@@ -51,7 +51,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: "baai/bge-large-en-v1.5",
       input: text,
     }),
   });
@@ -71,7 +71,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
+      model: "anthropic/claude-3.5-haiku",
       response_format: { type: "json_object" },
       messages: [
         {
@@ -253,6 +253,7 @@ server.registerTool(
           const m = t.metadata || {};
           const parts = [
             `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
+            `ID: ${t.id}`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
             `Type: ${m.type || "unknown"}`,
           ];
@@ -306,7 +307,7 @@ server.registerTool(
     try {
       let q = supabase
         .from("thoughts")
-        .select("content, metadata, created_at")
+        .select("id, content, metadata, created_at")
         .order("created_at", { ascending: false })
         .limit(limit);
 
@@ -334,12 +335,12 @@ server.registerTool(
 
       const results = data.map(
         (
-          t: { content: string; metadata: Record<string, unknown>; created_at: string },
+          t: { id: string; content: string; metadata: Record<string, unknown>; created_at: string },
           i: number
         ) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""}) [id: ${t.id}]\n   ${t.content}`;
         }
       );
 
@@ -494,6 +495,61 @@ server.registerTool(
 
       return {
         content: [{ type: "text" as const, text: confirmation }],
+      };
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool 7: Delete (Judy's customization — not in upstream)
+server.registerTool(
+  "delete_thought",
+  {
+    title: "Delete Thought(s)",
+    description:
+      "Permanently delete one or more captured thoughts by ID. Use after search_thoughts or list_thoughts to retire stale, completed, or incorrect entries. This is a hard delete — rows are removed entirely and cannot be recovered.",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      ids: z
+        .array(z.string().uuid())
+        .min(1)
+        .describe("Array of thought IDs (UUIDs) to delete. Get IDs from search_thoughts or list_thoughts."),
+    },
+  },
+  async ({ ids }) => {
+    try {
+      const { data, error } = await supabase
+        .from("thoughts")
+        .delete()
+        .in("id", ids)
+        .select("id");
+
+      if (error) {
+        return {
+          content: [{ type: "text" as const, text: `Delete error: ${error.message}` }],
+          isError: true,
+        };
+      }
+
+      const deletedIds = new Set((data ?? []).map((r: { id: string }) => r.id));
+      const deleted = deletedIds.size;
+      const requested = ids.length;
+      const lines = [`Deleted ${deleted} of ${requested} thought(s).`];
+      if (deleted < requested) {
+        const notFound = ids.filter((i) => !deletedIds.has(i));
+        lines.push(`Not found (already deleted or invalid ID): ${notFound.join(", ")}`);
+      }
+
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
       };
     } catch (err: unknown) {
       return {
